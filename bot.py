@@ -892,6 +892,10 @@ def note_aria2_failure(error):
         log.error("aria2 rejected a command-line option (exit 28); disabling aria2 for this process")
     return code is not None
 
+def missing_output_error(error):
+    """يتكرر أحياناً مع aria2 أثناء دمج الصيغ: الملف المؤقت يختفي قبل أن يقرأه yt-dlp."""
+    return isinstance(error, FileNotFoundError) or "No such file or directory" in str(error)
+
 def base_opts(referer=None):
     o = {"quiet": True, "no_warnings": True, "retries": 10, "fragment_retries": 10,
          "socket_timeout": 30, "concurrent_fragment_downloads": FRAGMENTS, "noprogress": True}
@@ -907,9 +911,9 @@ def ydl_run(url, opts, download):
             return y.extract_info(url, download=download)
     except Exception as initial_error:
         error = initial_error
-        if opts.get("external_downloader") and note_aria2_failure(error):
+        if opts.get("external_downloader") and (note_aria2_failure(error) or missing_output_error(error)):
             native = native_downloader_opts(opts)
-            log.warning("aria2 download failed (code %s); retrying with yt-dlp native downloader",
+            log.warning("external downloader failed (code %s); retrying with yt-dlp native downloader",
                         aria2_exit_code(error))
             try:
                 with yt_dlp.YoutubeDL(native) as y:
@@ -1130,7 +1134,8 @@ def do_download_fit(it, mode, outdir, progress_hook=None):
 
 def do_download(it, mode, outdir, progress_hook=None):
     o = base_opts(it.referer or None)
-    o.update(noplaylist=True, outtmpl=f"{outdir}/%(title).60s.%(ext)s")
+    # استخدام id بدلاً من العنوان يمنع مشاكل Unicode/طول الاسم وتعارض ملفات الدمج.
+    o.update(noplaylist=True, outtmpl=f"{outdir}/%(id)s.%(ext)s")
     if progress_hook: o["progress_hooks"] = [progress_hook]
     if HAS_ARIA2:
         o["external_downloader"] = {"default": "aria2c", "dash": "native",
@@ -1160,14 +1165,11 @@ def do_download(it, mode, outdir, progress_hook=None):
                 try: os.remove(os.path.join(outdir, f))
                 except OSError: pass
             info = None
-            if o.get("external_downloader") and note_aria2_failure(e):
+            if o.get("external_downloader") and (note_aria2_failure(e) or missing_output_error(e)):
                 o = native_downloader_opts(o)
-                log.warning("aria2 failed on reused probe info; retrying with yt-dlp native downloader")
-                try:
-                    with yt_dlp.YoutubeDL(o) as y:
-                        info = y.process_ie_result(copy.deepcopy(it.info), download=True)
-                except Exception as native_error:
-                    log.info("native retry of reused probe info failed: %s", native_error)
+                log.warning("external downloader failed on reused probe info; retrying with yt-dlp native downloader")
+                with yt_dlp.YoutubeDL(o) as y:
+                    info = y.process_ie_result(copy.deepcopy(it.info), download=True)
     if info is None:
         info = ydl_run(it.url, o, True)
     files = [os.path.join(outdir, f) for f in os.listdir(outdir)]
