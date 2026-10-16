@@ -1903,7 +1903,8 @@ async def run_batch(b):
     if done and not b.cancelled:
         what = ("وصلت الصور 📷" if all(it.engine == "gallery" for it in b.items)
                 else "وصلك الصوت 🎧" if b.mode == "audio" else "وصلك الفيديو 🎬" if done == 1 else f"وصلتك {done} فيديوهات 🎬")
-        asyncio.create_task(toast(b.chat_id, ui_note("ok", what), 6))
+        await send_illustrated(b.chat_id, SUCCESS_IMAGE_PATH,
+                                ui_note("ok", what, "الملفات وصلتك فوق ☝️"), after_kb())
 
 async def begin(b, answer=None):
     """يبدأ الدفعة. لو الأدمن ضبط حصة يومية بيتطبق هنا (الأدمن مستثنى)."""
@@ -2168,6 +2169,7 @@ def sites_text():
 COVER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "cover.jpg")
 DOWNLOAD_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "download.jpg")
 HELP_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "help.jpg")
+SUCCESS_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "success.jpg")
 
 def cover_active():
     return cfg("cover") == "1" and os.path.exists(COVER_PATH)
