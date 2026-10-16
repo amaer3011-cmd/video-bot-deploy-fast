@@ -2166,6 +2166,8 @@ def sites_text():
             "ولا المحتوى الخاص، ومحجوب المحتوى المخالف لقواعد تليجرام.</i>")
 
 COVER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "cover.jpg")
+DOWNLOAD_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "download.jpg")
+HELP_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "help.jpg")
 
 def cover_active():
     return cfg("cover") == "1" and os.path.exists(COVER_PATH)
@@ -2184,6 +2186,15 @@ async def send_home(chat_id, text, kb):
             except Exception as e:
                 log.info("cover send failed (%s)%s", e, " — retrying with file" if src == fid else "")
                 if src == fid: cfg_set("cover_fid", "")
+    return await app.send_message(chat_id, pe_html(text), reply_markup=kb)
+
+async def send_illustrated(chat_id, image_path, text, kb):
+    """يرسل شاشة بصورة توضيحية، ويرجع للنص تلقائياً لو الصورة غير متاحة."""
+    if os.path.exists(image_path):
+        try:
+            return await app.send_photo(chat_id, image_path, caption=pe_html(text), reply_markup=kb)
+        except Exception as e:
+            log.info("illustration send failed (%s); falling back to text", e)
     return await app.send_message(chat_id, pe_html(text), reply_markup=kb)
 
 async def show_home(cq):
@@ -2658,7 +2669,7 @@ async def on_cmd(_, m):
     elif cmd == "settings":
         txt, kb = settings_text(uid), settings_kb(uid)
     elif cmd == "help":
-        txt, kb = HELP, back_kb()
+        return await send_illustrated(m.chat.id, HELP_IMAGE_PATH, HELP, back_kb())
     elif cmd == "admin":
         if not is_admin(uid): return
         txt, kb = admin_home_text(), admin_kb()
@@ -2813,10 +2824,15 @@ async def on_cb(_, cq):
         awaiting.pop(uid, None)
         return await show_home(cq)
     if act == "dl":
-        return await show(cq, ui_prompt("📥", "تحميل جديد", "🔗 ابعت لينك فيديو أو صور",
-                                        "📋 أو أكتر من لينك في رسالة واحدة"), back_kb())
+        try: await cq.message.delete()
+        except Exception: pass
+        return await send_illustrated(cq.message.chat.id, DOWNLOAD_IMAGE_PATH,
+                                       ui_prompt("📥", "تحميل جديد", "🔗 ابعت لينك فيديو أو صور",
+                                                 "📋 أو أكتر من لينك في رسالة واحدة"), back_kb())
     if act == "hp":
-        return await show(cq, HELP, back_kb())
+        try: await cq.message.delete()
+        except Exception: pass
+        return await send_illustrated(cq.message.chat.id, HELP_IMAGE_PATH, HELP, back_kb())
     if act == "sites":
         return await show(cq, sites_text(), back_kb())
 
