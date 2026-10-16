@@ -635,12 +635,9 @@ def quality_modes(info):
         height = _format_height(fmt)
         if height > 0: heights.append(height)
     if not heights: return ["best", "1080", "720", "480", "360"]
-    modes = ["best"]
-    max_height = max(heights)
-    modes.extend(str(height) for height in sorted(set(heights), reverse=True) if height > 1080)
-    for target in (1080, 720, 480, 360):
-        if max_height >= target and any(height <= target for height in heights): modes.append(str(target))
-    return modes
+    # لا نعرض 720p مثلاً إذا كانت الصيغ الفعلية 1080p و360p فقط؛
+    # عرض الزر يجب أن يطابق أقصر ضلع للصيغة التي سيختارها yt-dlp فعلياً.
+    return ["best"] + [str(height) for height in sorted(set(heights), reverse=True)]
 
 def audio_available(info):
     if not isinstance(info, dict) or not info.get("formats"): return True
@@ -1341,14 +1338,17 @@ def progress_text(current, total=None, speed=None, eta=None, elapsed=None, width
     return heading + "\n" + "  •  ".join(parts)
 
 def make_upload_progress(it, label="رفع"):
-    st = {"started": time.monotonic(), "at": time.monotonic(), "bytes": 0.0, "speed": 0.0}
+    st = {"started": time.monotonic(), "at": time.monotonic(), "bytes": 0.0,
+          "last": 0.0, "speed": 0.0}
     async def callback(current, total, *_):
         now, cur = time.monotonic(), float(current or 0)
+        cur = max(cur, st["last"])
+        if cur <= st["last"] and not (total and cur >= total): return
         dt, finished = now - st["at"], bool(total and cur >= total)
         if dt < 1.0 and not finished: return
         inst = max(cur - st["bytes"], 0) / max(dt, 0.01)
-        st["speed"] = inst if not st["speed"] else 0.6 * st["speed"] + 0.4 * inst   # تنعيم السرعة
-        st["at"], st["bytes"] = now, cur
+        st["speed"] = inst if not st["speed"] else 0.85 * st["speed"] + 0.15 * inst
+        st["at"], st["bytes"], st["last"] = now, cur, cur
         try: eta = (float(total) - cur) / st["speed"] if st["speed"] > 0 and total else None
         except (TypeError, ValueError): eta = None
         it.detail = progress_text(cur, total, st["speed"], eta, now - st["started"])
@@ -1362,8 +1362,16 @@ def make_download_progress_hook(it, loop, state):
         if status == "downloading":
             if now - throttle["at"] < 0.7: return
             throttle["at"] = now
-            current = data.get("downloaded_bytes") or 0
-            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            current = max(float(data.get("downloaded_bytes") or 0), state.get("current", 0.0))
+            exact_total = data.get("total_bytes")
+            estimate_total = data.get("total_bytes_estimate")
+            if exact_total:
+                state["total"] = max(float(exact_total), state.get("total", 0.0))
+            elif not state.get("total") and estimate_total:
+                state["total"] = float(estimate_total)
+            state["current"] = current
+            state["total"] = max(state.get("total", 0.0), current)
+            total = state.get("total")
             speed = data.get("speed")
             eta = data.get("eta")
             detail = progress_text(current, total, speed, eta, now - state["started"])
@@ -1386,6 +1394,10 @@ async def wait_with_progress(task, it, outdir, hook_state=None):
         if hook_state and now - hook_state["updated"] < 2:
             continue
         size = dir_size(outdir)
+        # حجم المجلد قد ينقص أثناء الدمج/حذف ملف وسيط؛ لا نسمح للتقدم بالرجوع.
+        if hook_state:
+            size = max(size, hook_state.get("current", 0.0))
+            hook_state["current"] = size
         speed = max(size - previous_size, 0) / max(now - previous_at, 0.01)
         it.detail = progress_text(size, speed=speed,
                                   elapsed=now - (hook_state or {}).get("started", previous_at))
