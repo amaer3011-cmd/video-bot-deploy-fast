@@ -417,6 +417,7 @@ class Batch:
 
 batches: dict[str, Batch] = {}
 awaiting: dict[int, str] = {}
+pending_rename: dict[int, dict] = {}
 bc_pending: dict[int, tuple] = {}
 
 # رسائل أخطاء مفهومة بالعربي
@@ -860,6 +861,22 @@ ARIA2_EXIT = re.compile(r"aria2c exited with code\s+(\d+)", re.I)
 def is_youtube_url(url):
     host = (urlparse(url).hostname or "").lower()
     return any(host == h or host.endswith("." + h) for h in YT_HOSTS)
+
+def youtube_oembed_info(url):
+    """مصدر metadata خفيف لعنوان/قناة YouTube، لا يحتاج كوكيز ولا ينزّل الفيديو."""
+    if not is_youtube_url(url):
+        raise RuntimeError("oEmbed متاح لروابط YouTube فقط")
+    import requests
+    r = requests.get("https://www.youtube.com/oembed", params={"url": url, "format": "json"},
+                     headers={"User-Agent": UA}, timeout=15, allow_redirects=False)
+    if r.status_code != 200:
+        raise RuntimeError(f"YouTube oEmbed رجع HTTP {r.status_code}")
+    data = r.json()
+    title = " ".join(str(data.get("title") or "").split())
+    if not title:
+        raise RuntimeError("YouTube لم يرجّع عنوانًا لهذا الرابط")
+    return {"title": title, "uploader": data.get("author_name") or "",
+            "thumbnail": data.get("thumbnail_url") or ""}
 
 def youtube_android_vr_opts(opts):
     """Best-effort anonymous fallback; YouTube may still reject the hosting IP or limit formats."""
@@ -2656,6 +2673,22 @@ async def admin_input(m, uid, st):
         return await m.reply_text(ui_note("ok", "اتحفظت الصورة") + "\n\n" + wm_screen_text(), reply_markup=wm_kb())
 
 # ───────────── الهاندلرز ─────────────
+def mp4_media(message):
+    """يرجّع كائن فيديو/مستند MP4 من الرسالة، أو None لو الرسالة مش MP4."""
+    video = getattr(message, "video", None)
+    if video:
+        mime = (getattr(video, "mime_type", None) or "").lower()
+        name = (getattr(video, "file_name", None) or "").lower()
+        if mime == "video/mp4" or name.endswith(".mp4") or not name:
+            return video
+    doc = getattr(message, "document", None)
+    if doc:
+        mime = (getattr(doc, "mime_type", None) or "").lower()
+        name = (getattr(doc, "file_name", None) or "").lower()
+        if mime == "video/mp4" or name.endswith(".mp4"):
+            return doc
+    return None
+
 @app.on_message(filters.command("start") & filters.private)
 async def on_start(_, m):
     if not is_allowed(m.from_user.id):
@@ -2664,6 +2697,7 @@ async def on_start(_, m):
         return await m.reply_text(MAINT_HTML)
     touch_user(m.from_user.id)
     awaiting.pop(m.from_user.id, None)
+    pending_rename.pop(m.from_user.id, None)
     await send_home(m.chat.id, welcome_text(m.from_user.first_name or "", m.from_user.id), menu_kb(m.from_user.id))
 
 @app.on_message(filters.command(["menu", "history", "favorites", "settings", "help", "admin"]) & filters.private)
@@ -2675,6 +2709,7 @@ async def on_cmd(_, m):
         return await m.reply_text(MAINT_HTML)
     touch_user(uid)
     awaiting.pop(uid, None)
+    pending_rename.pop(uid, None)
     cmd = m.command[0].lower()
     if cmd == "history":
         txt, kb = hist_view(uid, "a", 0)
@@ -2743,11 +2778,103 @@ async def on_message(_, m):
         return await m.reply_text(ui_note("lock", "اشتراك إجباري", f"اشترك في القناة {esc_t(need)} الأول، وبعدها اضغط «تحقق» 👇"),
                                   reply_markup=sub_kb(need))
 
+    # للمشرف: استقبل MP4 أولًا، ثم اربطه برابط المصدر في الرسالة التالية.
+    now = time.time()
+    for pending_uid, pair in list(pending_rename.items()):
+        if now - pair.get("created", 0) > 600:
+            pending_rename.pop(pending_uid, None)
+    media = mp4_media(m)
+    if media:
+        if not is_admin(uid):
+            return await m.reply_text(ui_note("lock", "الميزة للمشرف فقط", "إعادة تسمية فيديو MP4 متاحة لصاحب البوت حاليًا."))
+        size = int(getattr(media, "file_size", 0) or 0)
+        if size and size > max_size():
+            return await m.reply_text(ui_note("stop", "الفيديو أكبر من الحد", f"الحجم الأقصى الحالي {human_bytes(max_size())}."))
+        pending_rename[uid] = {"message": m, "created": now}
+        return await m.reply_text(ui_note("ask", "وصلني فيديو MP4", "ابعت رابط المصدر في الرسالة التالية خلال 10 دقائق، وهعيد إرساله بعنوان المصدر وزر المطور."))
+
+    pending = pending_rename.get(uid)
+    if pending and now - pending.get("created", 0) <= 600:
+        urls = list(dict.fromkeys(u.rstrip(".,;:!?)]}،؛") for u in URL_RE.findall(m.text or "")))
+        if len(urls) != 1:
+            pending_rename.pop(uid, None)
+            return await m.reply_text(ui_note("warn", "ما وصلنيش رابط واحد صالح", "ابعت فيديو MP4 ثم رابط مصدر واحد مباشرةً في الرسالة التالية."))
+        pending_rename.pop(uid, None)
+        return await process_rename_pair(m, uid, pending, urls[0])
+
     urls = list(dict.fromkeys(u.rstrip(".,;:!?)]}،؛") for u in URL_RE.findall(m.text or "")))
     if not urls:
         return await m.reply_text(ui_note("ask", "مش لاقي رابط في رسالتك", "ابعت لينك يبدأ بـ https://  أو اختار من القائمة 👇"),
                                   reply_markup=menu_kb(uid))
     return await handle_urls(m, uid, urls)
+
+async def process_rename_pair(link_message, uid, pending, url):
+    """يعيد إرسال MP4 الذي أرسله الأدمن باسم عنوان المصدر مع رابط وزر المطور."""
+    if is_blocked(url):
+        return await link_message.reply_text(ui_note("stop", "الموقع ده مش مسموح بيه", "الرابط مرفوض حسب قائمة الحظر."))
+    if not await asyncio.to_thread(is_safe_url, url):
+        return await link_message.reply_text(ui_note("err", "الرابط غير صالح", "اتأكد أن الرابط عام ويبدأ بـ http أو https."))
+
+    status = await link_message.reply_text(ui_note("info", "بجهّز إعادة التسمية", "بجيب عنوان الفيديو من الرابط الأول..."))
+    outdir = tempfile.mkdtemp(prefix="rename_")
+    try:
+        try:
+            items, playlist = await asyncio.to_thread(probe, url)
+        except Exception:
+            items, playlist = None, None
+        if playlist:
+            raise RuntimeError("الرابط لازم يشير لفيديو واحد، مش قائمة تشغيل")
+        if items and len(items) == 1 and items[0].engine == "ytdlp":
+            item = items[0]
+            info = item.info or {}
+            title = " ".join(str(info.get("title") or item.title or "").split())
+        elif is_youtube_url(url):
+            # عنوان الفيديو يكفي لإعادة التسمية حتى لو منع IP الاستضافة yt-dlp من فحص الصيغ.
+            info = await asyncio.to_thread(youtube_oembed_info, url)
+            title = " ".join(str(info.get("title") or "").split())
+        else:
+            raise RuntimeError("الرابط لازم يشير لفيديو واحد مدعوم")
+        if not title:
+            raise RuntimeError("مقدرتش أجيب عنوان الفيديو من الرابط")
+        title = title[:180]
+        filename = safe_filename(title, "mp4")
+        target = os.path.join(outdir, filename)
+        source_msg = pending["message"]
+        media = mp4_media(source_msg)
+        actual_size = int(getattr(media, "file_size", 0) or 0)
+        if actual_size and actual_size > max_size():
+            raise RuntimeError("الملف أكبر من الحد المسموح")
+        path = await app.download_media(source_msg, file_name=outdir + os.sep)
+        if not path or not isinstance(path, (str, os.PathLike)) or not os.path.isfile(path):
+            raise RuntimeError("مقدرتش أنزّل ملف MP4 من تيليجرام")
+        if os.path.getsize(path) > max_size():
+            raise RuntimeError("الملف أكبر من الحد المسموح")
+        if os.path.abspath(path) != os.path.abspath(target):
+            os.replace(path, target)
+
+        video_obj = getattr(source_msg, "video", None)
+        duration = int(float(getattr(video_obj, "duration", 0) or info.get("duration") or 0))
+        width = int(getattr(video_obj, "width", 0) or info.get("width") or 0)
+        height = int(getattr(video_obj, "height", 0) or info.get("height") or 0)
+        safe_title = html.escape(title, quote=False)
+        safe_url = html.escape(url, quote=True)
+        site = esc_t(site_of(url), 40)
+        uploader = esc_t(info.get("uploader") or info.get("channel") or "", 60)
+        caption = f'<b>{safe_title}</b>\n<a href="{safe_url}">🔗 رابط المصدر</a>'
+        if site: caption += f"\n<i>📍 {site}</i>"
+        if uploader: caption += f"\n<i>👤 {uploader}</i>"
+        await app.send_video(link_message.chat.id, target, file_name=filename, caption=caption,
+                             parse_mode=ParseMode.HTML, duration=duration, width=width, height=height,
+                             supports_streaming=True, reply_markup=media_kb(),
+                             reply_to_message_id=link_message.id)
+        record(uid, title, "rename", url)
+        await status.edit_text(ui_note("ok", "تمت إعادة التسمية", f"اترسل الفيديو باسم <b>{esc_t(filename, 180)}</b> مع رابط المصدر وزر المطور."))
+    except Exception as e:
+        log.warning("rename pair failed for user %s: %s", uid, e)
+        try: await status.edit_text(ui_note("err", "مقدرتش أجهّز الفيديو", esc_t(clean_err(e), 180)))
+        except Exception: pass
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
 
 async def handle_urls(m, uid, urls, force_mode=None):
     blocked = [u for u in urls if is_blocked(u)]
