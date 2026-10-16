@@ -437,7 +437,11 @@ ERR_MAP = [
 
 def clean_err(e):
     s = ANSI_RE.sub("", str(e)).replace("ERROR:", "").strip()
-    for rx, msg in ERR_MAP:
+    if re.search(r"sign in to confirm|not a bot|page needs to be reloaded", s, re.I):
+        if has_cookies():
+            return "🤖 يوتيوب رفض الكوكيز الحالية أو حجب IP الخادم؛ الكوكيز موجودة لكن لم تنجح. جرّب جلسة أحدث، وإن استمر الرفض فغالبًا المشكلة من IP الاستضافة."
+        return ERR_MAP[0][1]
+    for rx, msg in ERR_MAP[1:]:
         if re.search(rx, s, re.I): return msg
     return "⚠️ " + s[:150].replace("<", "‹").replace(">", "›")
 
@@ -936,16 +940,16 @@ def ydl_run(url, opts, download):
                 error = native_error
                 log.warning("native downloader retry failed: %s", native_error)
         if is_youtube_url(url) and RETRY_YT_ANON.search(str(error)):
-            anonymous = youtube_android_vr_opts(opts)
+            fallback = youtube_android_vr_opts(opts)
             if not HAS_ARIA2:
-                anonymous = native_downloader_opts(anonymous)
+                fallback = native_downloader_opts(fallback)
             log.warning("YouTube rejected the default client; retrying with fallback clients (cookies: %s)", has_cookies())
             try:
-                with yt_dlp.YoutubeDL(anonymous) as y:
+                with yt_dlp.YoutubeDL(fallback) as y:
                     return y.extract_info(url, download=download)
-            except Exception as anonymous_error:
-                error = anonymous_error
-                log.warning("YouTube android_vr retry failed: %s", anonymous_error)
+            except Exception as fallback_error:
+                error = fallback_error
+                log.warning("YouTube fallback clients retry failed: %s", fallback_error)
         if IMPERSONATE and (RETRY_IMP.search(str(error)) or RETRY_IMP.search(str(initial_error))):
             o2 = native_downloader_opts(opts)
             o2["impersonate"] = IMPERSONATE
