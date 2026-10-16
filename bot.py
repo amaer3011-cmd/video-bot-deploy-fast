@@ -1311,34 +1311,37 @@ def human_bytes(value):
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
 
-def progress_text(current, total=None, speed=None, eta=None, width=10):
+def duration_text(seconds):
+    """تنسيق مدة قصيرة بشكل موحد في شاشة التقدم."""
+    seconds = max(0, int(float(seconds or 0)))
+    hh, rem = divmod(seconds, 3600)
+    mm, ss = divmod(rem, 60)
+    return f"{hh}س {mm:02}د {ss:02}ث" if hh else f"{mm}د {ss:02}ث" if mm else f"{ss}ث"
+
+def progress_text(current, total=None, speed=None, eta=None, elapsed=None, width=12):
     current = max(float(current or 0), 0.0)
     try: total = float(total) if total else 0.0
     except (TypeError, ValueError): total = 0.0
     if total > 0:
         ratio = min(max(current / total, 0.0), 1.0)
-        heading = f"<b>{int(ratio * 100)}%</b>  {ui_bar(ratio, width)}"
+        heading = f"<b>📊 {int(ratio * 100)}%</b>  {ui_bar(ratio, width)}"
         amount = f"📦 {human_bytes(current)} / {human_bytes(total)}"
     else:
         pos = int(time.monotonic() * 2) % (width - 1)
-        heading = "<b>…</b>  " + "▱" * pos + "▰▰" + "▱" * (width - pos - 2)
+        heading = "<b>📊 …</b>  " + "▱" * pos + "▰▰" + "▱" * (width - pos - 2)
         amount = f"📦 {human_bytes(current)}"
     parts = [amount]
     try:
-        if speed and float(speed) > 0: parts.append(f"⚡ {human_bytes(speed)}/s")
+        if speed and float(speed) > 0: parts.append(f"⚡ {human_bytes(speed)}/ث")
     except (TypeError, ValueError): pass
     try:
-        if eta is not None:
-            seconds = max(0, int(eta))
-            hh, rem = divmod(seconds, 3600)
-            mm, ss = divmod(rem, 60)
-            eta_text = f"{hh}h {mm}m {ss}s" if hh else f"{mm}m {ss:02d}s" if mm else f"{ss}s"
-            parts.append(f"⏱ {eta_text}")
+        if elapsed is not None: parts.append(f"⏱ مستغرق: {duration_text(elapsed)}")
+        if eta is not None: parts.append(f"⌛ متبقي: {duration_text(eta)}")
     except (TypeError, ValueError, OverflowError): pass
     return heading + "\n" + "  •  ".join(parts)
 
 def make_upload_progress(it, label="رفع"):
-    st = {"at": time.monotonic(), "bytes": 0.0, "speed": 0.0}
+    st = {"started": time.monotonic(), "at": time.monotonic(), "bytes": 0.0, "speed": 0.0}
     async def callback(current, total, *_):
         now, cur = time.monotonic(), float(current or 0)
         dt, finished = now - st["at"], bool(total and cur >= total)
@@ -1348,7 +1351,7 @@ def make_upload_progress(it, label="رفع"):
         st["at"], st["bytes"] = now, cur
         try: eta = (float(total) - cur) / st["speed"] if st["speed"] > 0 and total else None
         except (TypeError, ValueError): eta = None
-        it.detail = progress_text(cur, total, st["speed"], eta)
+        it.detail = progress_text(cur, total, st["speed"], eta, now - st["started"])
     return callback
 
 def make_download_progress_hook(it, loop, state):
@@ -1363,7 +1366,7 @@ def make_download_progress_hook(it, loop, state):
             total = data.get("total_bytes") or data.get("total_bytes_estimate")
             speed = data.get("speed")
             eta = data.get("eta")
-            detail = progress_text(current, total, speed, eta)
+            detail = progress_text(current, total, speed, eta, now - state["started"])
         elif status == "finished":
             detail = "🔄 اكتمل الجزء • جارٍ الدمج والمعالجة..."
         else:
@@ -1384,7 +1387,8 @@ async def wait_with_progress(task, it, outdir, hook_state=None):
             continue
         size = dir_size(outdir)
         speed = max(size - previous_size, 0) / max(now - previous_at, 0.01)
-        it.detail = progress_text(size, speed=speed)
+        it.detail = progress_text(size, speed=speed,
+                                  elapsed=now - (hook_state or {}).get("started", previous_at))
         previous_size, previous_at = size, now
         if hook_state: hook_state["updated"] = now
     return await task
@@ -1753,12 +1757,15 @@ async def run_item(b, it):
                     it.status, it.detail = "dl", "جارٍ تجهيز التنزيل..."
                     await wait_disk()
                     loop = asyncio.get_running_loop()
-                    progress_state = {"updated": time.monotonic()}
+                    progress_state = {"updated": time.monotonic(), "started": time.monotonic()}
                     hook = make_download_progress_hook(it, loop, progress_state)
                     task = asyncio.create_task(asyncio.to_thread(
                         do_download_fit, it, b.mode, outdir, hook))
                     path, info, used = await wait_with_progress(task, it, outdir, progress_state)
-                    it.detail = f"<b>100%</b>  {ui_bar(1)}\n📦 {human_bytes(os.path.getsize(path))}  •  ✅ اكتمل التنزيل"
+                    elapsed = time.monotonic() - progress_state["started"]
+                    it.detail = (f"<b>📊 100%</b>  {ui_bar(1, 12)}\n"
+                                 f"📦 {human_bytes(os.path.getsize(path))}  •  ⏱ مستغرق: {duration_text(elapsed)}\n"
+                                 "✅ اكتمل التنزيل")
                     if wm and not b.cancelled:
                         it.detail = "🔖 بيحط العلامة المائية..."
                         path = await apply_watermark(path, wm, outdir)
