@@ -81,10 +81,10 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 # مفيش حدود تطبيقية للتحميل: الدفعات والقوائم والروابط والتزامن بلا سقف.
 MAX_PLAYLIST = MAX_GALLERY = 0
 TRANSFER_PROFILE = os.getenv("TRANSFER_PROFILE", "fast").strip().lower()
-CONN = int(os.getenv("CONNECTIONS", "24"))
-FRAGMENTS = int(os.getenv("FRAGMENTS", "24"))
-UPLOAD_WORKERS = int(os.getenv("UPLOAD_WORKERS", "16"))
-UPLOAD_SESSIONS = int(os.getenv("UPLOAD_SESSIONS", "4"))      # جلسات Media منفصلة للرفع المتوازي
+CONN = int(os.getenv("CONNECTIONS", "28"))
+FRAGMENTS = int(os.getenv("FRAGMENTS", "28"))
+UPLOAD_WORKERS = int(os.getenv("UPLOAD_WORKERS", "20"))
+UPLOAD_SESSIONS = int(os.getenv("UPLOAD_SESSIONS", "6"))      # جلسات Media منفصلة للرفع المتوازي
 DEV_USERNAME = os.getenv("DEV_USERNAME", "A7med19_7").strip().lstrip("@")
 DEV_LABEL = "𝐷𝑒𝑣: @" + DEV_USERNAME
 COBALT_API_URL = os.getenv("COBALT_API_URL", "").strip().rstrip("/")   # اختياري: سيرفر تحميل خارجي (cobalt)
